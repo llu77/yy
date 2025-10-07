@@ -1,0 +1,78 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isValidImageFile() {
+      return request.resource.contentType.matches('image/.*') &&
+             request.resource.size < 5 * 1024 * 1024; // Max 5MB
+    }
+    
+    function isValidDocumentFile() {
+      return request.resource.contentType.matches('application/pdf') &&
+             request.resource.size < 10 * 1024 * 1024; // Max 10MB
+    }
+    
+    function hasRole(role) {
+      return isAuthenticated() && 
+        request.auth.token.role == role;
+    }
+    
+    function hasAnyRole(roles) {
+      return isAuthenticated() && 
+        request.auth.token.role in roles;
+    }
+    
+    // Public assets (logos, etc.)
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if hasRole('مدير النظام');
+    }
+    
+    // User profile images
+    match /users/{userId}/profile/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && 
+                     request.auth.uid == userId &&
+                     isValidImageFile();
+      allow delete: if isAuthenticated() && 
+                      (request.auth.uid == userId || hasRole('مدير النظام'));
+    }
+    
+    // Financial documents (receipts, invoices, etc.)
+    match /financial/{branch}/{year}/{month}/{fileName} {
+      allow read: if hasAnyRole(['مدير النظام', 'مشرف فرع', 'شريك']);
+      allow write: if hasAnyRole(['مدير النظام', 'مشرف فرع']) &&
+                     (isValidImageFile() || isValidDocumentFile());
+      allow delete: if hasRole('مدير النظام');
+    }
+    
+    // Employee documents
+    match /employees/{employeeId}/documents/{fileName} {
+      allow read: if isAuthenticated() && 
+                    (request.auth.uid == employeeId || 
+                     hasAnyRole(['مدير النظام', 'مشرف فرع']));
+      allow write: if isAuthenticated() && 
+                     request.auth.uid == employeeId &&
+                     (isValidImageFile() || isValidDocumentFile());
+      allow delete: if hasRole('مدير النظام');
+    }
+    
+    // Backup files (restricted access)
+    match /backups/{allPaths=**} {
+      allow read: if hasRole('مدير النظام');
+      allow write: if false; // Only cloud functions can write
+      allow delete: if hasRole('مدير النظام');
+    }
+    
+    // Reject all other paths
+    match /{document=**} {
+      allow read: if false;
+      allow write: if false;
+    }
+  }
+}

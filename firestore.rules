@@ -1,0 +1,122 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions for enhanced security
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasRole(role) {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+    
+    function hasAnyRole(roles) {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in roles;
+    }
+    
+    function validateUserData() {
+      let validRoles = ['مدير النظام', 'مشرف فرع', 'موظف', 'شريك'];
+      let validBranches = ['كافة الفروع', 'فرع لبن', 'فرع طويق'];
+      return request.resource.data.keys().hasAll(['name', 'email', 'role', 'branch']) &&
+        request.resource.data.role in validRoles &&
+        request.resource.data.branch in validBranches &&
+        request.resource.data.email is string &&
+        request.resource.data.name is string;
+    }
+    
+    // المستخدمون: يمكن للمستخدم قراءة وإنشاء وتحديث بياناته فقط
+    match /users/{userId} {
+      allow read: if isOwner(userId) || hasAnyRole(['مدير النظام', 'مشرف فرع']);
+      allow create: if isOwner(userId) && validateUserData();
+      allow update: if isOwner(userId) && validateUserData() && 
+        // Prevent users from changing their own role
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
+      allow delete: if hasRole('مدير النظام');
+    }
+
+    // الإيرادات والمصروفات: Enhanced access control
+    function canAccessFinancialData() {
+      return hasAnyRole(['مدير النظام', 'مشرف فرع', 'شريك']);
+    }
+    
+    function validateRevenueData() {
+      return request.resource.data.keys().hasAll(['date', 'branch', 'totalRevenue', 'cash', 'card']) &&
+        request.resource.data.totalRevenue is number &&
+        request.resource.data.totalRevenue >= 0 &&
+        request.resource.data.cash is number &&
+        request.resource.data.cash >= 0 &&
+        request.resource.data.card is number &&
+        request.resource.data.card >= 0 &&
+        request.resource.data.branch in ['فرع لبن', 'فرع طويق'];
+    }
+    
+    function validateExpenseData() {
+      return request.resource.data.keys().hasAll(['date', 'branch', 'category', 'amount', 'description']) &&
+        request.resource.data.amount is number &&
+        request.resource.data.amount > 0 &&
+        request.resource.data.description is string &&
+        request.resource.data.branch in ['فرع لبن', 'فرع طويق'];
+    }
+    
+    match /revenue/{docId} {
+      allow read: if canAccessFinancialData();
+      allow create: if canAccessFinancialData() && validateRevenueData();
+      allow update: if canAccessFinancialData() && validateRevenueData();
+      allow delete: if hasRole('مدير النظام');
+    }
+    
+    match /expenses/{docId} {
+      allow read: if canAccessFinancialData();
+      allow create: if canAccessFinancialData() && validateExpenseData();
+      allow update: if canAccessFinancialData() && validateExpenseData();
+      allow delete: if hasRole('مدير النظام');
+    }
+    
+    // الطلبات: Enhanced request management
+    function validateRequestData() {
+      let validTypes = ['استقالة', 'تأمين', 'كفالة', 'سلفة', 'راتب', 'أخرى'];
+      let validStatuses = ['مُعلق', 'مُوافق عليه', 'مرفوض'];
+      return request.resource.data.keys().hasAll(['type', 'employeeId', 'employeeName', 'employeeBranch', 'date', 'status']) &&
+        request.resource.data.type in validTypes &&
+        request.resource.data.status in validStatuses &&
+        request.resource.data.employeeId is string &&
+        request.resource.data.employeeName is string &&
+        request.resource.data.employeeBranch is string;
+    }
+    
+    function canManageRequests() {
+      return hasAnyRole(['مدير النظام', 'مشرف فرع']);
+    }
+    
+    function isRequestOwner(requestId) {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/requests/$(requestId)).data.employeeId == request.auth.uid;
+    }
+    
+    match /requests/{requestId} {
+      // يمكن للموظف إنشاء طلب لنفسه فقط
+      allow create: if isAuthenticated() && 
+        request.auth.uid == request.resource.data.employeeId &&
+        validateRequestData() &&
+        request.resource.data.status == 'مُعلق'; // New requests must be pending
+      
+      // القراءة: الموظف يرى طلباته، المدراء يرون كل شيء
+      allow read: if isRequestOwner(requestId) || canManageRequests();
+      
+      // التحديث: فقط المدراء يمكنهم تحديث الطلبات
+      allow update: if canManageRequests() && validateRequestData();
+      
+      // الحذف: فقط مدير النظام
+      allow delete: if hasRole('مدير النظام');
+    }
+  }
+}
